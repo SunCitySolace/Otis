@@ -119,15 +119,13 @@ impl Band {
     }
 }
 
-pub const FEED_MIN: f64 = -12.0;
+pub const FEED_MIN: f64 = -43.0;
 pub const FEED_MAX: f64 = -3.0;
-pub const DELAY_MAX: f64 = 500.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Crossfeed {
     pub enabled: bool,
     pub feed_db: f64,
-    pub delay_us: f64,
 }
 
 impl Default for Crossfeed {
@@ -135,7 +133,6 @@ impl Default for Crossfeed {
         Crossfeed {
             enabled: false,
             feed_db: -6.0,
-            delay_us: 260.0,
         }
     }
 }
@@ -176,7 +173,6 @@ impl Workspace {
         self.bands.iter_mut().for_each(Band::normalize);
         self.manual_preamp = round_to(self.manual_preamp.clamp(-GAIN_LIMIT, GAIN_LIMIT), 10.0);
         self.crossfeed.feed_db = round_to(self.crossfeed.feed_db.clamp(FEED_MIN, FEED_MAX), 10.0);
-        self.crossfeed.delay_us = self.crossfeed.delay_us.clamp(0.0, DELAY_MAX).round();
     }
 }
 

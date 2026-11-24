@@ -12,9 +12,10 @@ use std::f64::consts::PI;
 /// computed on the UI thread without knowing the device rate.
 pub const PREVIEW_RATE: f64 = 48_000.0;
 
-/// Crossfeed low-pass, fixed to the BS2B / Chu Moy head-shadow corner.
+/// Fixed head-shadow crossfeed parameters (Chu Moy / BS2B corner + ±30° ITD).
 pub const CROSSFEED_HZ: f64 = 700.0;
 pub const CROSSFEED_Q: f64 = 0.5;
+pub const CROSSFEED_DELAY_US: f64 = 260.0;
 
 /// Headroom Auto-Preamp leaves below the response peak.
 pub const PREAMP_MARGIN_DB: f64 = 0.2;
@@ -147,7 +148,7 @@ pub fn eq_db(bands: &[Band], freq: f64) -> f64 {
 /// They sum to exactly 1, so in-phase (mono) bass, where the low-passed
 /// opposite channel adds fully, comes out at unity and can never clip.
 pub fn crossfeed_gains(feed_db: f64) -> (f64, f64) {
-    let feed = 10f64.powf(feed_db / 20.0);
+    let feed = db_to_lin(feed_db);
     (1.0 / (1.0 + feed), feed / (1.0 + feed))
 }
 
@@ -158,7 +159,7 @@ fn crossfeed_db(cf: &Crossfeed, freq: f64) -> f64 {
     }
     let (direct, cross) = crossfeed_gains(cf.feed_db);
     let lp = coeffs(FilterType::LowPass, CROSSFEED_HZ, CROSSFEED_Q, 0.0, PREVIEW_RATE);
-    let lp_gain = 10f64.powf(lp.db_at(freq, PREVIEW_RATE) / 20.0);
+    let lp_gain = db_to_lin(lp.db_at(freq, PREVIEW_RATE));
     20.0 * (direct + cross * lp_gain).log10()
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Otis only ever writes or deletes this file; it is never parsed back.
 
-use crate::dsp::{self, CROSSFEED_HZ, CROSSFEED_Q};
+use crate::dsp::{self, CROSSFEED_DELAY_US, CROSSFEED_HZ, CROSSFEED_Q};
 use crate::model::Workspace;
 use crate::preset::num;
 use crate::store;
@@ -93,7 +93,7 @@ fn filter_graph(ws: &Workspace) -> String {
     }
 
     let (direct, cross) = dsp::crossfeed_gains(ws.crossfeed.feed_db);
-    let delay = ws.crossfeed.delay_us / 1e6;
+    let delay = CROSSFEED_DELAY_US / 1e6;
     let mut links = String::new();
     // Each output mixes its own channel with the low-passed, delayed
     // opposite channel: (side, eq port, opposite side).

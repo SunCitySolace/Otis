@@ -1,18 +1,17 @@
 //! The unified preset format: Equalizer APO / AutoEQ text plus an
 //! `# otis:` comment header for Otis-only settings.
 
-use crate::model::{Band, ChannelScope, FilterType, Workspace};
+use crate::model::{Band, ChannelScope, FEED_MAX, FilterType, Workspace};
 
 const HEADER: &str = "# otis:";
 
 pub fn serialize(ws: &Workspace) -> String {
     let on_off = |b: bool| if b { "on" } else { "off" };
     let mut out = format!(
-        "{HEADER} auto_preamp={} crossfeed={} feed_db={:.1} delay_us={:.0}\n",
+        "{HEADER} auto_preamp={} crossfeed={} feed_db={:.1}\n",
         on_off(ws.auto_preamp),
         on_off(ws.crossfeed.enabled),
         ws.crossfeed.feed_db,
-        ws.crossfeed.delay_us,
     );
     out += &format!("Preamp: {:.1} dB\n", ws.preamp_db());
     for (i, b) in ws.bands.iter().enumerate() {
@@ -40,9 +39,18 @@ pub fn parse(text: &str) -> Workspace {
             for (key, value) in meta.split_whitespace().filter_map(|kv| kv.split_once('=')) {
                 match key {
                     "auto_preamp" => ws.auto_preamp = value == "on",
-                    "crossfeed" => ws.crossfeed.enabled = value == "on",
+                    "crossfeed" => {
+                        if let Ok(pct) = value.parse::<u8>() {
+                            ws.crossfeed.enabled = pct > 0;
+                            if pct > 0 {
+                                let lin = (pct.min(100) as f64 / 100.0) * crate::dsp::db_to_lin(FEED_MAX);
+                                ws.crossfeed.feed_db = 20.0 * lin.log10();
+                            }
+                        } else {
+                            ws.crossfeed.enabled = value == "on";
+                        }
+                    }
                     "feed_db" => ws.crossfeed.feed_db = value.parse().unwrap_or(ws.crossfeed.feed_db),
-                    "delay_us" => ws.crossfeed.delay_us = value.parse().unwrap_or(ws.crossfeed.delay_us),
                     _ => {}
                 }
             }
@@ -134,6 +142,7 @@ mod tests {
         ws.crossfeed.feed_db = -4.5;
         ws.normalize();
         let text = serialize(&ws);
+        assert!(text.contains("crossfeed=on feed_db=-4.5"));
         assert!(text.contains("Filter 2: OFF HP Fc 30 Hz Q 1.41"));
         assert_eq!(parse(&text), ws);
         assert_eq!(serialize(&parse(&text)), text);

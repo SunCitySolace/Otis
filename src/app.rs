@@ -2,7 +2,7 @@
 
 use crate::dsp::{self, PreviewParams};
 use crate::graph::{self, format_hz};
-use crate::model::{Band, DELAY_MAX, FEED_MAX, FEED_MIN, FREQ_MAX, FREQ_MIN, FilterType, MAX_BANDS, Q_MAX, Q_MIN, Workspace};
+use crate::model::{Band, FEED_MAX, FEED_MIN, FREQ_MAX, FREQ_MIN, FilterType, MAX_BANDS, Q_MAX, Q_MIN, Workspace};
 use crate::pw::{self, Graph};
 use crate::pwconf::{self, SINK_NAME};
 use crate::store::{self, Config, Devices, State};
@@ -790,27 +790,88 @@ impl App {
     }
 
     fn crossfeed_menu(&mut self, ui: &mut Ui) {
-        let button = ui.button("Crossfeed").on_hover_text(
-            "Feeds a low-passed (700 Hz), slightly delayed copy of each channel into the other, like speakers do. \
-             Not part of the sweep preview.",
-        );
-        if self.workspace.crossfeed.enabled {
+        let cf = self.workspace.crossfeed;
+        let tip = if cf.enabled {
+            format!(
+                "Crossfeed: {:.1} dB feed (700 Hz, 260 µs).\n\
+                 Applied in PipeWire; not part of the sweep preview.",
+                cf.feed_db
+            )
+        } else {
+            "Crossfeed: Off.\n\
+             Feeds a low-passed (700 Hz), slightly delayed (260 µs) copy of each channel into the other.\n\
+             Not part of the sweep preview."
+                .into()
+        };
+        let button = ui.button("Crossfeed").on_hover_text(tip);
+        if cf.enabled {
             let dot = button.rect.right_top() + egui::vec2(-5.0, 5.0);
             ui.painter().circle_filled(dot, 3.0, theme::ACCENT);
         }
         egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(510.0);
             let crossfeed = &mut self.workspace.crossfeed;
             ui.checkbox(&mut crossfeed.enabled, "Enable crossfeed");
             ui.add_enabled_ui(crossfeed.enabled, |ui| {
-                egui::Grid::new("crossfeed").num_columns(2).show(ui, |ui| {
+                ui.horizontal(|ui| {
                     ui.label("Feed");
-                    ui.add(egui::Slider::new(&mut crossfeed.feed_db, FEED_MIN..=FEED_MAX).step_by(0.1).suffix(" dB"));
-                    ui.end_row();
-                    ui.label("Delay");
-                    ui.add(egui::Slider::new(&mut crossfeed.delay_us, 0.0..=DELAY_MAX).step_by(10.0).suffix(" µs"));
-                    ui.end_row();
+                    // 400 px across a 40.0 dB span = 1 px per 0.1 dB; smart_aim off
+                    // stops egui from snapping the pointer to round .0 / .5 values.
+                    ui.spacing_mut().slider_width = 400.0;
+                    ui.add(
+                        egui::Slider::new(&mut crossfeed.feed_db, FEED_MIN..=FEED_MAX)
+                            .step_by(0.1)
+                            .smart_aim(false)
+                            .drag_value_speed(0.05)
+                            .fixed_decimals(1)
+                            .suffix(" dB"),
+                    );
                 });
             });
+            ui.label(RichText::new("700 Hz low-pass · 260 µs delay").size(11.0).color(theme::TEXT_DIM));
+            ui.separator();
+
+            const REFERENCES: [(&str, &str); 5] = [
+                ("-43 to -15 dB", "Ultra-subtle — keeps headphone width, gently eases hard-pan fatigue"),
+                ("-9.5 dB", "Jan Meier — subtle and airy, softens hard panning with minimal tonal shift"),
+                ("-6.0 dB", "Chu Moy — balanced speaker-like center image; natural all-rounder"),
+                ("-4.5 dB", "BS2B Default — distinct nearfield monitor feel; narrower, cohesive stage"),
+                ("-3.0 dB", "Maximum — heavy blend approaching mono; tames extreme 60s hard-panning"),
+            ];
+            egui::Grid::new("crossfeed_ref")
+                .num_columns(2)
+                .spacing([14.0, 5.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Feed Level").size(10.5).color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Reference & Subjective Effect").size(10.5).color(theme::TEXT_DIM));
+                    ui.end_row();
+
+                    for (level, desc) in REFERENCES {
+                        ui.label(RichText::new(level).monospace().size(11.0).color(theme::TEXT));
+                        ui.label(RichText::new(desc).size(11.0).color(theme::TEXT_DIM));
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(theme::SURFACE)
+                .stroke(egui::Stroke::new(1.0, theme::HAIRLINE))
+                .corner_radius(egui::CornerRadius::same(5))
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.label(RichText::new("Note:").strong().size(11.0).color(theme::WARN));
+                        ui.label(
+                            RichText::new("Crossfeed is applied in PipeWire only and is not audible during sweep preview.")
+                                .size(11.0)
+                                .color(theme::TEXT_DIM),
+                        );
+                    });
+                });
         });
     }
 
