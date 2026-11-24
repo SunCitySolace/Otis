@@ -1,0 +1,44 @@
+[package]
+name = "otis"
+version = "0.1.0"
+edition = "2024"
+description = "Parametric EQ and manual headphone tuner for PipeWire"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+pipewire = { version = "0.10", features = ["v1_2_0"] }
+triple_buffer = "9"
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+rfd = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# --- Packaging (Phase 2) -----------------------------------------------------
+
+[package.metadata.deb]
+depends = "pipewire (>= 1.4), libpipewire-0.3-0t64 | libpipewire-0.3-0"
+section = "sound"
+assets = [
+    ["target/release/otis", "usr/bin/", "755"],
+    ["assets/otis.desktop", "usr/share/applications/", "644"],
+    ["assets/otis.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["assets/otis.service", "usr/lib/systemd/user/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/otis", dest = "/usr/bin/otis", mode = "755" },
+    { source = "assets/otis.desktop", dest = "/usr/share/applications/otis.desktop", mode = "644" },
+    { source = "assets/otis.svg", dest = "/usr/share/icons/hicolor/scalable/apps/otis.svg", mode = "644" },
+    { source = "assets/otis.service", dest = "/usr/lib/systemd/user/otis.service", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+pipewire = ">= 1.4"
+pipewire-libs = ">= 1.4"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Otis EQ hot-swap daemon
+# Ordering only. Deliberately no PartOf=/BindsTo= on pipewire.service: the
+# daemon restarts PipeWire itself and must survive that.
+After=pipewire.service wireplumber.service
+
+[Service]
+ExecStart=/usr/bin/otis --daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

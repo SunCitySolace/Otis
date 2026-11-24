@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Otis
+GenericName=Parametric Equalizer
+Comment=Parametric EQ and by-ear headphone tuner for PipeWire
+Exec=otis
+Icon=otis
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=equalizer;eq;headphones;pipewire;autoeq;crossfeed;
+StartupWMClass=otis
