@@ -827,7 +827,7 @@ impl App {
             ui.add_enabled_ui(crossfeed.enabled, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Feed");
-                    // 400 px across a 40.0 dB span = 1 px per 0.1 dB; smart_aim off
+                    // 400 px across a 12.0 dB span ≈ 3.3 px per 0.1 dB step; smart_aim off
                     // stops egui from snapping the pointer to round .0 / .5 values.
                     ui.spacing_mut().slider_width = 400.0;
                     ui.add(
@@ -844,7 +844,7 @@ impl App {
             ui.separator();
 
             const REFERENCES: [(&str, &str); 5] = [
-                ("-43 to -15 dB", "Ultra-subtle — keeps headphone width, gently eases hard-pan fatigue"),
+                ("-15.0 dB", "Minimum — lightest blend; same lower limit as BS2B"),
                 ("-9.5 dB", "Jan Meier — subtle and airy, softens hard panning with minimal tonal shift"),
                 ("-6.0 dB", "Chu Moy — balanced speaker-like center image; natural all-rounder"),
                 ("-4.5 dB", "BS2B Default — distinct nearfield monitor feel; narrower, cohesive stage"),

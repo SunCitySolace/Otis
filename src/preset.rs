@@ -1,7 +1,7 @@
 //! The unified preset format: Equalizer APO / AutoEQ text plus an
 //! `# otis:` comment header for Otis-only settings.
 
-use crate::model::{Band, ChannelScope, FEED_MAX, FilterType, Workspace};
+use crate::model::{Band, ChannelScope, FilterType, Workspace};
 
 const HEADER: &str = "# otis:";
 
@@ -39,17 +39,7 @@ pub fn parse(text: &str) -> Workspace {
             for (key, value) in meta.split_whitespace().filter_map(|kv| kv.split_once('=')) {
                 match key {
                     "auto_preamp" => ws.auto_preamp = value == "on",
-                    "crossfeed" => {
-                        if let Ok(pct) = value.parse::<u8>() {
-                            ws.crossfeed.enabled = pct > 0;
-                            if pct > 0 {
-                                let lin = (pct.min(100) as f64 / 100.0) * crate::dsp::db_to_lin(FEED_MAX);
-                                ws.crossfeed.feed_db = 20.0 * lin.log10();
-                            }
-                        } else {
-                            ws.crossfeed.enabled = value == "on";
-                        }
-                    }
+                    "crossfeed" => ws.crossfeed.enabled = value == "on",
                     "feed_db" => ws.crossfeed.feed_db = value.parse().unwrap_or(ws.crossfeed.feed_db),
                     _ => {}
                 }

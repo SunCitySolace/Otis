@@ -119,7 +119,9 @@ impl Band {
     }
 }
 
-pub const FEED_MIN: f64 = -43.0;
+/// Crossfeed feed range. The floor matches BS2B's lightest setting (15 dB);
+/// the ceiling stops short of a near-mono blend.
+pub const FEED_MIN: f64 = -15.0;
 pub const FEED_MAX: f64 = -3.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
