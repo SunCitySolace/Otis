@@ -22,7 +22,9 @@ const GRID_FREQS: [(f64, &str); 10] = [
     (20_000.0, "20k"),
 ];
 const MIN_RANGE_DB: f64 = 12.0;
-const MARKER_RADIUS: f32 = 9.0;
+const MARKER_RADIUS: f32 = 8.0;
+/// Click target around each marker, a little larger than the dot itself.
+const HIT_RADIUS: f32 = 12.0;
 
 pub struct View<'a> {
     pub workspace: &'a Workspace,
@@ -43,8 +45,7 @@ pub enum Event {
 pub fn show(ui: &mut Ui, view: &View, dragging: &mut bool) -> Option<Event> {
     let (outer, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let painter = ui.painter_at(outer);
-    painter.rect_filled(outer, 6.0, theme::GRAPH_BG);
-    let plot = Rect::from_min_max(outer.min + vec2(40.0, 12.0), outer.max - vec2(14.0, 24.0));
+    let plot = Rect::from_min_max(outer.min + vec2(44.0, 14.0), outer.max - vec2(18.0, 26.0));
     if plot.width() < 40.0 || plot.height() < 40.0 {
         return None;
     }
@@ -80,7 +81,7 @@ pub fn show(ui: &mut Ui, view: &View, dragging: &mut bool) -> Option<Event> {
     for (freq, label) in GRID_FREQS {
         let x = x_of(freq);
         painter.vline(x, plot.y_range(), Stroke::new(1.0, theme::GRID));
-        painter.text(pos2(x, plot.bottom() + 5.0), Align2::CENTER_TOP, label, label_font.clone(), theme::TEXT_DIM);
+        painter.text(pos2(x, plot.bottom() + 6.0), Align2::CENTER_TOP, label, label_font.clone(), theme::TEXT_DIM);
     }
     let db_step = if range <= 24.0 { 6.0 } else { 12.0 };
     let mut db = -range;
@@ -89,7 +90,7 @@ pub fn show(ui: &mut Ui, view: &View, dragging: &mut bool) -> Option<Event> {
             painter.hline(plot.x_range(), y_of(db), Stroke::new(1.0, theme::GRID));
         }
         painter.text(
-            pos2(plot.left() - 6.0, y_of(db)),
+            pos2(plot.left() - 8.0, y_of(db)),
             Align2::RIGHT_CENTER,
             if db == 0.0 { "0".to_string() } else { format!("{db:+.0}") },
             label_font.clone(),
@@ -102,54 +103,59 @@ pub fn show(ui: &mut Ui, view: &View, dragging: &mut bool) -> Option<Event> {
     painter.hline(plot.x_range(), y_of(0.0), Stroke::new(1.0, theme::ZERO_LINE));
 
     let clipped = painter.with_clip_rect(plot);
-    if preamp.abs() > 0.05 {
-        let py = y_of(preamp);
-        if py >= plot.top() && py <= plot.bottom() {
-            clipped.extend(Shape::dashed_line(
-                &[pos2(plot.left(), py), pos2(plot.right(), py)],
-                Stroke::new(1.0, theme::PREAMP_LINE),
-                4.0,
-                4.0,
-            ));
-        }
+    let baseline = y_of(preamp);
+    if preamp.abs() > 0.05 && baseline >= plot.top() && baseline <= plot.bottom() {
+        clipped.extend(Shape::dashed_line(
+            &[pos2(plot.left(), baseline), pos2(plot.right(), baseline)],
+            Stroke::new(1.0, theme::PREAMP_LINE),
+            4.0,
+            4.0,
+        ));
     }
 
     let to_points = |values: &[f64]| -> Vec<Pos2> { freqs.iter().zip(values).map(|(&f, &v)| pos2(x_of(f), y_of(v))).collect() };
-
-    // 2. The selected band's own curve, softly shaded from the preamp baseline.
-    if let Some(band) = view.selected.and_then(|i| bands.get(i)) {
-        let own: Vec<f64> = freqs.iter().map(|&f| preamp + dsp::band_db(band, f)).collect();
-        let points = to_points(&own);
-        let baseline = y_of(preamp);
+    let area_mesh = |points: &[Pos2], base_y: f32, color: Color32| -> Shape {
         let mut mesh = Mesh::default();
         for (i, p) in points.iter().enumerate() {
-            mesh.colored_vertex(*p, theme::BAND_FILL);
-            mesh.colored_vertex(pos2(p.x, baseline), theme::BAND_FILL);
+            mesh.colored_vertex(*p, color);
+            mesh.colored_vertex(pos2(p.x, base_y), color);
             if i > 0 {
                 let n = (i * 2) as u32;
                 mesh.add_triangle(n - 2, n - 1, n);
                 mesh.add_triangle(n - 1, n, n + 1);
             }
         }
-        clipped.add(Shape::mesh(mesh));
-        clipped.line(points, Stroke::new(1.0, theme::BAND_LINE));
+        Shape::mesh(mesh)
+    };
+
+    // 2. Subtle warm wash under the combined curve relative to the preamp baseline.
+    let points = to_points(&curve);
+    if !view.bypass {
+        clipped.add(area_mesh(&points, baseline, theme::CURVE_FILL));
     }
 
-    // 3. The combined, preamp-shifted response. Dimmed and dashed under
+    // 3. The selected band's own curve, softly shaded from the preamp baseline.
+    if let Some(band) = view.selected.and_then(|i| bands.get(i)) {
+        let own: Vec<f64> = freqs.iter().map(|&f| preamp + dsp::band_db(band, f)).collect();
+        let own_points = to_points(&own);
+        clipped.add(area_mesh(&own_points, baseline, theme::BAND_FILL));
+        clipped.line(own_points, Stroke::new(1.0, theme::BAND_LINE));
+    }
+
+    // 4. The combined, preamp-shifted response. Dimmed and dashed under
     //    bypass, when it is not what you are hearing.
-    let points = to_points(&curve);
     if view.bypass {
         clipped.extend(Shape::dashed_line(&points, Stroke::new(1.5, theme::CURVE_BYPASSED), 6.0, 5.0));
     } else {
         clipped.line(points, Stroke::new(2.0, theme::ACCENT));
     }
 
-    // 4. Numbered band markers on the curve. Click nearest to select; never draggable.
+    // 5. Numbered band markers on the curve. Click nearest to select; never draggable.
     let centers: Vec<Pos2> = bands
         .iter()
         .map(|band| pos2(x_of(band.freq), y_of(combined(band.freq)).clamp(plot.top(), plot.bottom())))
         .collect();
-    let hit_radius = MARKER_RADIUS + 4.0;
+    let hit_radius = HIT_RADIUS;
     let nearest_marker = |pos: Pos2| -> Option<usize> {
         centers
             .iter()
@@ -169,7 +175,8 @@ pub fn show(ui: &mut Ui, view: &View, dragging: &mut bool) -> Option<Event> {
         .flatten();
     let mut event = pressed_at.and_then(nearest_marker).map(Event::SelectBand);
 
-    // Draw hovered and selected markers on top of neighbours.
+    // 6. Markers: hollow rings that punch through the curve; the selected band
+    //    is a solid off-white disc with no outline. Hovered and selected draw last.
     let mut order: Vec<usize> = (0..bands.len()).collect();
     order.sort_by_key(|&i| {
         if view.selected == Some(i) {
@@ -180,27 +187,30 @@ pub fn show(ui: &mut Ui, view: &View, dragging: &mut bool) -> Option<Event> {
             0
         }
     });
+    let number_font = FontId::proportional(10.5);
     for i in order {
         let band = &bands[i];
         let center = centers[i];
         let selected = view.selected == Some(i);
         let hovered = hovered_band == Some(i);
-        let (fill, stroke, stroke_w, text) = match (selected, hovered, band.enabled) {
-            (true, _, _) => (theme::ACCENT, theme::ACCENT, 1.5, theme::GRAPH_BG),
-            (false, true, true) => (theme::SURFACE_ACTIVE, theme::ACCENT, 1.75, theme::TEXT),
-            (false, true, false) => (theme::SURFACE, theme::TEXT, 1.5, theme::TEXT),
-            (false, false, true) => (theme::MARKER_FILL, theme::TEXT, 1.5, theme::TEXT),
-            (false, false, false) => (theme::GRAPH_BG, theme::TEXT_DIM, 1.5, theme::TEXT_DIM),
+        let (fill, stroke, text) = match (selected, hovered, band.enabled) {
+            (true, _, true) => (theme::ACCENT, Stroke::NONE, theme::ON_ACCENT),
+            (true, _, false) => (theme::CURVE_BYPASSED, Stroke::NONE, theme::ON_ACCENT),
+            (false, true, true) => (theme::SURFACE_HOVER, Stroke::new(1.5, theme::TEXT), theme::TEXT),
+            (false, true, false) => (theme::SURFACE, Stroke::new(1.25, theme::TEXT_DIM), theme::TEXT),
+            (false, false, true) => (theme::GRAPH_BG, Stroke::new(1.25, theme::BAND_LINE), theme::TEXT),
+            (false, false, false) => (theme::GRAPH_BG, Stroke::new(1.0, theme::ZERO_LINE), theme::TEXT_DIM),
         };
-        painter.circle(center, MARKER_RADIUS, fill, Stroke::new(stroke_w, stroke));
-        painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(11.0), text);
+        painter.circle(center, MARKER_RADIUS, fill, stroke);
+        // Nudge down half a pixel: proportional digits sit high in their line box.
+        painter.text(center + vec2(0.0, 0.5), Align2::CENTER_CENTER, (i + 1).to_string(), number_font.clone(), text);
     }
 
-    // 5. The sweep cursor and its readout pill.
+    // 7. The sweep cursor (Hi-Res Gold) over the markers, with its readout pill on top.
     let cursor_x = x_of(view.cursor_hz);
     painter.vline(cursor_x, plot.y_range(), Stroke::new(1.5, theme::CURSOR));
     let readout = format!("{} · {:+.1} dB", format_hz(view.cursor_hz), combined(view.cursor_hz));
-    let galley = painter.layout_no_wrap(readout, FontId::proportional(12.0), theme::GRAPH_BG);
+    let galley = painter.layout_no_wrap(readout, FontId::monospace(11.5), theme::ON_ACCENT);
     let pill = Rect::from_center_size(pos2(cursor_x, plot.top() + 12.0), galley.size() + vec2(14.0, 6.0));
     let shift = (plot.left() - pill.left()).max(0.0) - (pill.right() - plot.right()).max(0.0);
     let pill = pill.translate(vec2(shift, 0.0));

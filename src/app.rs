@@ -21,6 +21,8 @@ const RESTART_SETTLE: Duration = Duration::from_secs(4);
 const PAUSE_DELAY: Duration = Duration::from_millis(150);
 /// How long transient Apply / Disable confirmation stays visible in the footer.
 const FLASH_DURATION: Duration = Duration::from_secs(3);
+/// The band table can never be dragged so tall that the graph drops below this.
+const MIN_GRAPH_H: f32 = 220.0;
 
 pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -81,6 +83,8 @@ struct App {
     selected: Option<usize>,
     cursor_hz: f64,
     cursor_drag: bool,
+    /// Last frame's sweep strip height, used to cap the band table's resize.
+    sweep_h: f32,
     sweep: bool,
     bypass: bool,
     level_db: f32,
@@ -128,6 +132,7 @@ impl App {
             selected: None,
             cursor_hz: 1000.0,
             cursor_drag: false,
+            sweep_h: 48.0,
             sweep: false,
             bypass: false,
             level_db: dsp::LEVEL_DEFAULT_DB,
@@ -385,8 +390,9 @@ impl App {
                 continue;
             }
             match key {
-                Key::Space => self.sweep = !self.sweep,
-                Key::B => self.bypass = !self.bypass,
+                // Like their buttons, these need a connected output to preview on.
+                Key::Space if self.device_online() => self.sweep = !self.sweep,
+                Key::B if self.device_online() => self.bypass = !self.bypass,
                 Key::Tab => {
                     self.cycle_band(mods.shift);
                     self.drop_focus = true;
@@ -789,6 +795,13 @@ impl App {
         });
     }
 
+    /// A small status LED in a button's top-right corner.
+    fn paint_led(ui: &Ui, rect: Rect, color: Color32, glow: Color32) {
+        let dot = rect.right_top() + egui::vec2(-6.0, 6.0);
+        ui.painter().circle_filled(dot, 5.5, glow);
+        ui.painter().circle_filled(dot, 2.8, color);
+    }
+
     fn crossfeed_menu(&mut self, ui: &mut Ui) {
         let cf = self.workspace.crossfeed;
         let tip = if cf.enabled {
@@ -805,8 +818,7 @@ impl App {
         };
         let button = ui.button("Crossfeed").on_hover_text(tip);
         if cf.enabled {
-            let dot = button.rect.right_top() + egui::vec2(-5.0, 5.0);
-            ui.painter().circle_filled(dot, 3.0, theme::ACCENT);
+            Self::paint_led(ui, button.rect, theme::LED_GREEN, theme::LED_GLOW);
         }
         egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(510.0);
@@ -878,98 +890,134 @@ impl App {
     // --- Zone 3: sweep & preview strip ------------------------------------------
 
     fn sweep_strip(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            let label = if self.sweep { "Sweep On" } else { "Sweep Off" };
-            let mut button = Button::new(RichText::new(label).strong()).min_size(egui::vec2(118.0, 28.0));
-            if self.sweep {
-                button = Button::new(RichText::new(label).strong().color(theme::ON_ACCENT))
-                    .min_size(egui::vec2(118.0, 28.0))
-                    .fill(theme::ACCENT);
-            }
-            let hint = if self.device_online() {
-                "Play a sine at the cursor frequency, straight to the hardware output (Space)"
-            } else {
-                "Select a connected hardware output to preview"
-            };
-            if ui.add_enabled(self.device_online(), button).on_hover_text(hint).clicked() {
-                self.sweep = !self.sweep;
-            }
-            ui.label(RichText::new("Level").color(theme::TEXT_DIM));
-            ui.add(
-                egui::Slider::new(&mut self.level_db, dsp::LEVEL_MIN_DB..=dsp::LEVEL_CAP_DB)
-                    .fixed_decimals(0)
-                    .suffix(" dBFS"),
-            )
-            .on_hover_text("Preview level. Capped at -6 dBFS to protect your hearing and sensitive IEMs.");
+        egui::Frame::new()
+            .fill(theme::ROW_ALT)
+            .stroke(egui::Stroke::new(1.0, theme::HAIRLINE))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Left: the sweep preview. Nothing here touches system audio;
+                    // it only drives Otis's own test tone.
+                    self.sweep_group(ui);
 
-            let mut hz = self.cursor_hz;
-            let hz_drag = DragValue::new(&mut hz)
-                .range(FREQ_MIN..=FREQ_MAX)
-                .speed(self.cursor_hz * 0.004)
-                .custom_formatter(|n, _| format_hz(n))
-                .custom_parser(|s| {
-                    let clean = s.trim().replace([',', ' '], "");
-                    let stripped = clean.strip_suffix("Hz").or_else(|| clean.strip_suffix("hz")).unwrap_or(&clean);
-                    stripped.parse::<f64>().ok()
+                    // Right: the EQ itself.
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.eq_group(ui));
                 });
-            let hz_resp = ui
-                .scope(|ui| {
-                    ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                    ui.add_sized(egui::vec2(102.0, 24.0), hz_drag)
-                })
-                .inner
-                .on_hover_text("Sweep cursor frequency. Drag or click to type an exact Hz value.");
-            if hz_resp.changed() {
-                self.selected = None;
-                self.cursor_hz = hz;
-            }
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let can_add = self.workspace.bands.len() < MAX_BANDS;
-                let add = ui.add_enabled(can_add, Button::new("+ Add Band"));
-                if add.on_hover_text("Add a peaking band at the cursor frequency (A)").clicked() {
-                    self.add_band();
-                }
-                ui.separator();
-
-                let preamp = self.workspace.preamp_db();
-                let mut auto = self.workspace.auto_preamp;
-                let toggle = ui.checkbox(&mut auto, "Auto").on_hover_text(
-                    "Auto-Preamp: lower the level by the true peak of the combined response (plus 0.2 dB) so boosts never clip.",
-                );
-                if toggle.changed() {
-                    // Start manual adjustment from the value that was in effect.
-                    self.workspace.manual_preamp = preamp;
-                    self.workspace.auto_preamp = auto;
-                }
-                if self.workspace.auto_preamp {
-                    ui.label(RichText::new(format!("{preamp:.1} dB")).monospace());
-                } else {
-                    ui.scope(|ui| {
-                        ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
-                        ui.add(
-                            DragValue::new(&mut self.workspace.manual_preamp)
-                                .range(-30.0..=30.0)
-                                .speed(0.1)
-                                .fixed_decimals(1)
-                                .suffix(" dB"),
-                        );
-                    });
-                }
-                ui.label(RichText::new("Preamp").color(theme::TEXT_DIM));
-                ui.separator();
-
-                let mut bypass = Button::new(RichText::new("Bypass").strong()).min_size(egui::vec2(84.0, 28.0));
-                if self.bypass {
-                    bypass = Button::new(RichText::new("Bypassed").strong().color(theme::ON_ACCENT))
-                        .min_size(egui::vec2(84.0, 28.0))
-                        .fill(theme::WARN);
-                }
-                if ui.add(bypass).on_hover_text("Hear the sweep without EQ, for A/B comparison (B)").clicked() {
-                    self.bypass = !self.bypass;
-                }
             });
-        });
+    }
+
+    fn sweep_group(&mut self, ui: &mut Ui) {
+        let online = self.device_online();
+        let label = if self.sweep { "Sweep On" } else { "Sweep Off" };
+        let mut button = Button::new(RichText::new(label).strong()).min_size(egui::vec2(114.0, 26.0));
+        if self.sweep {
+            button = button.fill(theme::SURFACE_ACTIVE);
+        }
+        let hint = if online {
+            "Play a sine at the cursor frequency, straight to the hardware output (Space)"
+        } else {
+            "Select a connected hardware output to preview"
+        };
+        let sweep_resp = ui.add_enabled(online, button).on_hover_text(hint);
+        if self.sweep {
+            Self::paint_led(ui, sweep_resp.rect, theme::LED_GREEN, theme::LED_GLOW);
+        }
+        if sweep_resp.clicked() {
+            self.sweep = !self.sweep;
+        }
+        ui.label(RichText::new("Level").color(theme::TEXT_DIM));
+        ui.add(
+            egui::Slider::new(&mut self.level_db, dsp::LEVEL_MIN_DB..=dsp::LEVEL_CAP_DB)
+                .fixed_decimals(0)
+                .suffix(" dBFS"),
+        )
+        .on_hover_text("Preview level. Capped at -6 dBFS to protect your hearing and sensitive IEMs.");
+
+        let mut hz = self.cursor_hz;
+        let hz_drag = DragValue::new(&mut hz)
+            .range(FREQ_MIN..=FREQ_MAX)
+            .speed(self.cursor_hz * 0.004)
+            .custom_formatter(|n, _| format_hz(n))
+            .custom_parser(|s| {
+                let clean = s.trim().replace([',', ' '], "");
+                let stripped = clean.strip_suffix("Hz").or_else(|| clean.strip_suffix("hz")).unwrap_or(&clean);
+                stripped.parse::<f64>().ok()
+            });
+        let hz_resp = ui
+            .scope(|ui| {
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                ui.add_sized(egui::vec2(102.0, 24.0), hz_drag)
+            })
+            .inner
+            .on_hover_text("Sweep cursor frequency. Drag or click to type an exact Hz value.");
+        if hz_resp.changed() {
+            self.selected = None;
+            self.cursor_hz = hz;
+        }
+
+        // Fixed width so the label swap does not shift the row. Stays clickable
+        // while the sweep is stopped: it also switches the graph to the bypassed curve.
+        let label = if self.bypass { "Bypassing" } else { "Bypass" };
+        let bypass_hint = if online {
+            "Hear the sweep tone without EQ (B).\nOnly affects Otis's sweep preview; system audio is unchanged."
+        } else {
+            "Select a connected hardware output to preview"
+        };
+        let bypass = ui
+            .add_enabled(online, Button::new(label).min_size(egui::vec2(92.0, 26.0)))
+            .on_hover_text(bypass_hint)
+            .on_disabled_hover_text(bypass_hint);
+        if self.bypass {
+            Self::paint_led(ui, bypass.rect, theme::LED_RED, theme::LED_RED_GLOW);
+        }
+        if bypass.clicked() {
+            self.bypass = !self.bypass;
+        }
+    }
+
+    /// Laid out right to left.
+    fn eq_group(&mut self, ui: &mut Ui) {
+        let can_add = self.workspace.bands.len() < MAX_BANDS;
+        let add = ui.add_enabled(can_add, Button::new("+ Add Band").min_size(egui::vec2(0.0, 26.0)));
+        if add.on_hover_text("Add a peaking band at the cursor frequency (A)").clicked() {
+            self.add_band();
+        }
+        ui.separator();
+
+        let preamp = self.workspace.preamp_db();
+        let mut auto = self.workspace.auto_preamp;
+        let toggle = ui.checkbox(&mut auto, "Auto").on_hover_text(
+            "Auto-Preamp: lower the level by the true peak of the combined response (plus 0.2 dB) so boosts never clip.",
+        );
+        if toggle.changed() {
+            // Start manual adjustment from the value that was in effect.
+            self.workspace.manual_preamp = preamp;
+            self.workspace.auto_preamp = auto;
+        }
+        if self.workspace.auto_preamp {
+            egui::Frame::new()
+                .fill(theme::GRAPH_BG)
+                .stroke(egui::Stroke::new(1.0, theme::HAIRLINE))
+                .corner_radius(egui::CornerRadius::same(5))
+                .inner_margin(egui::Margin::symmetric(8, 3))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(format!("{preamp:.1} dB")).monospace().size(12.0));
+                });
+        } else {
+            ui.scope(|ui| {
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
+                ui.add_sized(
+                    egui::vec2(76.0, 24.0),
+                    DragValue::new(&mut self.workspace.manual_preamp)
+                        .range(-30.0..=30.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                );
+            });
+        }
+        ui.label(RichText::new("Preamp").color(theme::TEXT_DIM));
     }
 
     // --- Zone 4: band table -------------------------------------------------------
@@ -988,44 +1036,78 @@ impl App {
 
         let mut select = None;
         let mut delete = None;
-        let mut sort = false;
 
-        // Rows span the window: fixed columns for the controls, and the
-        // three numeric columns share whatever width is left.
+        // Fixed-width columns so values line up the same at any window width;
+        // the slack goes before the delete column, which pins to the right edge.
         const ROW_H: f32 = 30.0;
-        const FIXED: [f32; 3] = [46.0, 46.0, 150.0];
-        const DELETE_W: f32 = 44.0;
+        const WIDTHS: [f32; 6] = [34.0, 40.0, 148.0, 128.0, 104.0, 92.0];
+        const DELETE_W: f32 = 40.0;
+        const PAD: f32 = 7.0;
         let columns = |row: Rect| -> [Rect; 7] {
-            let flex = ((row.width() - FIXED.iter().sum::<f32>() - DELETE_W) / 3.0).max(60.0);
-            let widths = [FIXED[0], FIXED[1], FIXED[2], flex, flex, flex, DELETE_W];
             let mut x = row.left();
-            widths.map(|w| {
-                let rect = Rect::from_min_size(egui::pos2(x, row.top()), egui::vec2(w, row.height())).shrink2(egui::vec2(8.0, 0.0));
+            let fixed = WIDTHS.map(|w| {
+                let rect = Rect::from_min_size(egui::pos2(x, row.top()), egui::vec2(w, row.height()));
                 x += w;
-                rect
-            })
+                rect.shrink2(egui::vec2(PAD, 0.0))
+            });
+            let delete = Rect::from_min_max(egui::pos2(row.right() - DELETE_W, row.top()), row.max);
+            std::array::from_fn(|i| fixed.get(i).copied().unwrap_or(delete))
         };
-        let cell = |ui: &mut Ui, rect: Rect, salt: (usize, usize)| {
-            ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)).id_salt(salt))
+        // Index, toggle and the numeric fields are centred; Type reads left-aligned.
+        let centered = |col: usize| col != 2;
+        let cell = |ui: &mut Ui, rect: Rect, col: usize, salt: (usize, usize)| {
+            let mut layout = Layout::left_to_right(Align::Center);
+            if centered(col) {
+                layout = layout.with_main_align(Align::Center);
+            }
+            ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout).id_salt(salt))
         };
 
-        let (header, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+        let (header, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
         let cols = columns(header);
-        for (col, title) in [(0, "#"), (1, "On"), (2, "Type"), (3, "Frequency (Hz)"), (4, "Gain (dB)"), (5, "Q Factor")] {
-            let mut ui = cell(ui, cols[col], (usize::MAX, col));
-            ui.label(RichText::new(title).color(theme::TEXT_DIM).size(10.5));
-            if col == 3 {
-                sort = ui.small_button("Sort").on_hover_text("Sort bands by frequency").clicked();
-            }
+        let header_font = egui::FontId::proportional(11.0);
+        for (col, title) in [(0, "#"), (1, "On"), (2, "Type"), (4, "Gain (dB)"), (5, "Q")] {
+            let rect = cols[col];
+            let (pos, align) = if centered(col) {
+                (rect.center(), egui::Align2::CENTER_CENTER)
+            } else {
+                (rect.left_center(), egui::Align2::LEFT_CENTER)
+            };
+            ui.painter().text(pos, align, title, header_font.clone(), theme::TEXT_DIM);
         }
+        // The frequency header doubles as the sort control.
+        let sort_resp = ui
+            .interact(cols[3], ui.scope_id().with("sort-by-freq"), Sense::click())
+            .on_hover_text("Sort bands by frequency")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let sort_color = if sort_resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+        let galley = ui.painter().layout_no_wrap("Frequency (Hz)".into(), header_font, sort_color);
+        let glyph_w = 9.0;
+        let text_pos = cols[3].center() - egui::vec2((galley.size().x + glyph_w) / 2.0, galley.size().y / 2.0);
+        let glyph_x = text_pos.x + galley.size().x + 5.0;
+        ui.painter().galley(text_pos, galley, sort_color);
+        let mid = cols[3].center().y;
+        for dir in [-1.0f32, 1.0] {
+            let tip = egui::pos2(glyph_x, mid + dir * 5.0);
+            let base = mid + dir * 1.5;
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![tip, egui::pos2(glyph_x - 3.0, base), egui::pos2(glyph_x + 3.0, base)],
+                sort_color,
+                egui::Stroke::NONE,
+            ));
+        }
+        let sort = sort_resp.clicked();
         ui.painter().hline(header.x_range(), header.bottom(), egui::Stroke::new(1.0, theme::HAIRLINE));
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.add_space(3.0);
             ui.spacing_mut().item_spacing.y = 2.0;
             for (i, band) in self.workspace.bands.iter_mut().enumerate() {
                 let (row, row_response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::click());
                 let is_selected = self.selected == Some(i);
-                let fill = match (is_selected, row_response.hovered()) {
+                // Hovering a widget inside the row still counts as hovering the row.
+                let row_hovered = ui.rect_contains_pointer(row);
+                let fill = match (is_selected, row_hovered) {
                     (true, _) => theme::ROW_SELECTED,
                     (false, true) => theme::ROW_HOVER,
                     (false, false) if i % 2 == 1 => theme::ROW_ALT,
@@ -1033,7 +1115,7 @@ impl App {
                 };
                 ui.painter().rect_filled(row, 5.0, fill);
                 if is_selected {
-                    let bar = Rect::from_min_size(row.min, egui::vec2(3.0, row.height())).shrink2(egui::vec2(0.0, 6.0));
+                    let bar = Rect::from_min_size(row.min, egui::vec2(3.0, row.height())).shrink2(egui::vec2(0.0, 7.0));
                     ui.painter().rect_filled(bar, 1.5, theme::ACCENT);
                 }
                 if row_response.clicked() {
@@ -1044,14 +1126,25 @@ impl App {
                 let opacity = if band.enabled { 1.0 } else { 0.4 };
                 let mut edited = false;
 
-                let mut c = cell(ui, cols[0], (i, 0));
-                let number = RichText::new((i + 1).to_string()).monospace().color(if is_selected { theme::ACCENT } else { theme::TEXT_DIM });
-                c.label(number);
+                let number_color = match (is_selected, band.enabled) {
+                    (true, _) => theme::TEXT,
+                    (false, true) => theme::TEXT_DIM,
+                    (false, false) => theme::CURVE_BYPASSED,
+                };
+                ui.painter().text(
+                    cols[0].center(),
+                    egui::Align2::CENTER_CENTER,
+                    (i + 1).to_string(),
+                    egui::FontId::monospace(12.0),
+                    number_color,
+                );
 
-                let mut c = cell(ui, cols[1], (i, 1));
+                let mut c = cell(ui, cols[1], 1, (i, 1));
+                c.spacing_mut().item_spacing.x = 0.0;
+                c.spacing_mut().icon_spacing = 0.0;
                 c.checkbox(&mut band.enabled, "").on_hover_text("Enable or disable this band");
 
-                let mut c = cell(ui, cols[2], (i, 2));
+                let mut c = cell(ui, cols[2], 2, (i, 2));
                 c.multiply_opacity(opacity);
                 ComboBox::from_id_salt(("type", i)).width(cols[2].width()).selected_text(band.kind.name()).show_ui(&mut c, |ui| {
                     for kind in FilterType::ALL {
@@ -1059,8 +1152,8 @@ impl App {
                     }
                 });
 
-                let field = |c: &Ui, max_w: f32| egui::vec2(c.available_width().min(max_w), 22.0);
-                let mut c = cell(ui, cols[3], (i, 3));
+                let field = |c: &Ui| egui::vec2(c.available_width(), 22.0);
+                let mut c = cell(ui, cols[3], 3, (i, 3));
                 c.multiply_opacity(opacity);
                 c.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
                 let speed = band.freq * 0.004;
@@ -1068,9 +1161,9 @@ impl App {
                     .range(FREQ_MIN..=FREQ_MAX)
                     .speed(speed)
                     .custom_formatter(|n, _| preset::num(n, 1));
-                edited |= c.add_sized(field(&c, 136.0), freq).changed();
+                edited |= c.add_sized(field(&c), freq).changed();
 
-                let mut c = cell(ui, cols[4], (i, 4));
+                let mut c = cell(ui, cols[4], 4, (i, 4));
                 c.multiply_opacity(opacity);
                 c.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
                 let has_gain = band.kind.has_gain();
@@ -1086,17 +1179,26 @@ impl App {
                             "0.0".into()
                         }
                     });
-                edited |= c.add_enabled_ui(has_gain, |c| c.add_sized(field(c, 110.0), gain).changed()).inner;
+                edited |= c.add_enabled_ui(has_gain, |c| c.add_sized(field(c), gain).changed()).inner;
 
-                let mut c = cell(ui, cols[5], (i, 5));
+                let mut c = cell(ui, cols[5], 5, (i, 5));
                 c.multiply_opacity(opacity);
                 c.style_mut().override_text_style = Some(egui::TextStyle::Monospace);
                 let q = DragValue::new(&mut band.q).range(Q_MIN..=Q_MAX).speed(0.01).fixed_decimals(2);
-                edited |= c.add_sized(field(&c, 100.0), q).changed();
+                edited |= c.add_sized(field(&c), q).changed();
 
-                let mut c = cell(ui, cols[6], (i, 6));
-                let remove = Button::new(RichText::new("×").size(16.0).color(theme::TEXT_DIM)).frame(false);
-                if c.add(remove).on_hover_text("Delete band").clicked() {
+                // Delete stays quiet until the row is in play.
+                let mut c = cell(ui, cols[6], 6, (i, 6));
+                let (del_rect, del_resp) = c.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
+                let del_color = if del_resp.hovered() {
+                    theme::DANGER
+                } else if row_hovered || is_selected {
+                    theme::TEXT_DIM
+                } else {
+                    theme::ZERO_LINE
+                };
+                c.painter().text(del_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(16.0), del_color);
+                if del_resp.on_hover_text("Delete band").clicked() {
                     delete = Some(i);
                 }
 
@@ -1117,15 +1219,20 @@ impl App {
         }
     }
 
-    // --- Footer: context-sensitive shortcut hints & transient feedback ----------
+    // --- Footer: context-sensitive shortcut keycaps & transient feedback --------
 
     fn footer_bar(&mut self, ui: &mut Ui) {
         let hint = |ui: &mut Ui, key: &str, desc: &str| {
-            ui.label(RichText::new(key).monospace().size(11.0).color(theme::TEXT));
+            egui::Frame::new()
+                .fill(theme::SURFACE)
+                .stroke(egui::Stroke::new(1.0, theme::HAIRLINE))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(5, 1))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(key).monospace().size(10.5).color(theme::TEXT));
+                });
             ui.label(RichText::new(desc).size(11.0).color(theme::TEXT_DIM));
-        };
-        let sep = |ui: &mut Ui| {
-            ui.label(RichText::new("·").size(11.0).color(theme::ZERO_LINE));
+            ui.add_space(4.0);
         };
 
         ui.horizontal(|ui| {
@@ -1133,46 +1240,33 @@ impl App {
             match self.selected {
                 Some(i) => {
                     ui.label(RichText::new(format!("Band {}", i + 1)).strong().size(11.0).color(theme::ACCENT));
-                    sep(ui);
+                    ui.add_space(4.0);
                     hint(ui, "h/l", "Freq");
-                    sep(ui);
                     hint(ui, "j/k", "Gain");
-                    sep(ui);
                     hint(ui, "[/]", "Q");
-                    sep(ui);
                     hint(ui, "m", "Mute");
-                    sep(ui);
                     hint(ui, "d", "Delete");
-                    sep(ui);
                     hint(ui, "Esc", "Free sweep");
-                    sep(ui);
                     hint(ui, "Space", "Sweep");
-                    sep(ui);
-                    hint(ui, "b", "Bypass");
-                    sep(ui);
+                    hint(ui, "b", "Bypass sweep");
                     hint(ui, "Shift/Alt", "Coarse/Fine");
                 }
                 None => {
                     hint(ui, "h/l", "Sweep");
-                    sep(ui);
                     hint(ui, "a", "Add band");
-                    sep(ui);
                     hint(ui, "Space", "Play/Stop");
-                    sep(ui);
-                    hint(ui, "b", "Bypass");
-                    sep(ui);
+                    hint(ui, "b", "Bypass sweep");
                     hint(ui, "1-9 / Tab", "Select band");
-                    sep(ui);
                     hint(ui, "Shift/Alt", "Coarse/Fine");
                 }
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.restart_rx.is_some() {
-                    ui.label(RichText::new("Restarting PipeWire…").size(11.0).color(theme::ACCENT));
+                    ui.label(RichText::new("Restarting PipeWire…").size(11.0).color(theme::TEXT_DIM));
                 } else if let Some((msg, at)) = self.flash {
                     if let Some(remaining) = FLASH_DURATION.checked_sub(at.elapsed()) {
-                        ui.label(RichText::new(msg).size(11.0).color(theme::ACCENT));
+                        ui.label(RichText::new(msg).size(11.0).color(theme::TEXT));
                         ui.ctx().request_repaint_after(remaining);
                     } else {
                         self.flash = None;
@@ -1295,29 +1389,49 @@ impl eframe::App for App {
                 ui.label(RichText::new(problem).color(theme::DANGER));
             }
         });
-        let footer_frame = egui::Frame::new().fill(theme::WINDOW_BG).inner_margin(egui::Margin::symmetric(12, 5));
+        let footer_frame = egui::Frame::new().fill(theme::GRAPH_BG).inner_margin(egui::Margin::symmetric(12, 5));
         egui::Panel::bottom("footer").frame(footer_frame).show_separator_line(true).show(ui, |ui| {
             self.footer_bar(ui);
         });
-        egui::Panel::bottom("bands").frame(frame).resizable(true).default_size(220.0).min_size(110.0).show(ui, |ui| {
-            self.band_table(ui);
-        });
-        egui::Panel::bottom("sweep").frame(frame).show_separator_line(false).show(ui, |ui| self.sweep_strip(ui));
+        // Whatever the sweep strip and graph need is off-limits to the band table.
+        let bands_max = (ui.available_height() - self.sweep_h - MIN_GRAPH_H).max(110.0);
+        egui::Panel::bottom("bands")
+            .frame(frame.inner_margin(egui::Margin { left: 12, top: 4, right: 12, bottom: 8 }))
+            .resizable(true)
+            .default_size(220.0)
+            .size_range(110.0..=bands_max)
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                self.band_table(ui);
+            });
+        self.sweep_h = egui::Panel::bottom("sweep")
+            .frame(frame.inner_margin(egui::Margin { left: 12, top: 8, right: 12, bottom: 4 }))
+            .show_separator_line(false)
+            .show(ui, |ui| self.sweep_strip(ui))
+            .response
+            .rect
+            .height();
         egui::CentralPanel::default().frame(frame.inner_margin(egui::Margin::symmetric(12, 0))).show(ui, |ui| {
-            let view = graph::View {
-                workspace: &self.workspace,
-                selected: self.selected,
-                cursor_hz: self.cursor_hz,
-                bypass: self.bypass,
-            };
-            match graph::show(ui, &view, &mut self.cursor_drag) {
-                Some(graph::Event::SelectBand(i)) => self.select(i),
-                Some(graph::Event::MoveCursor(freq)) => {
-                    self.selected = None;
-                    self.cursor_hz = freq;
-                }
-                None => {}
-            }
+            egui::Frame::new()
+                .fill(theme::GRAPH_BG)
+                .stroke(egui::Stroke::new(1.0, theme::HAIRLINE))
+                .corner_radius(egui::CornerRadius::same(6))
+                .show(ui, |ui| {
+                    let view = graph::View {
+                        workspace: &self.workspace,
+                        selected: self.selected,
+                        cursor_hz: self.cursor_hz,
+                        bypass: self.bypass,
+                    };
+                    match graph::show(ui, &view, &mut self.cursor_drag) {
+                        Some(graph::Event::SelectBand(i)) => self.select(i),
+                        Some(graph::Event::MoveCursor(freq)) => {
+                            self.selected = None;
+                            self.cursor_hz = freq;
+                        }
+                        None => {}
+                    }
+                });
         });
 
         self.show_modal(&ctx);

@@ -328,19 +328,25 @@ impl ksni::Tray for OtisTray {
     }
 }
 
-/// A 32 px accent-coloured dot, as ARGB32.
+/// A 32 px miniature Otis badge: Warm Ivory "O" on a Charcoal disc (ARGB32).
 fn tray_icon() -> ksni::Icon {
-    let [r, g, b] = [0xa3, 0xb8, 0xff];
+    const BG: [f32; 3] = [0x19 as f32, 0x18 as f32, 0x17 as f32];
+    const FG: [f32; 3] = [0xf8 as f32, 0xf0 as f32, 0xdf as f32];
     const SIZE: i32 = 32;
     let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    let centre = (SIZE as f32 - 1.0) / 2.0;
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let centre = (SIZE as f32 - 1.0) / 2.0;
-            let distance = ((x as f32 - centre).powi(2) + (y as f32 - centre).powi(2)).sqrt();
-            // Signed distance to the shape edge, turned into 1 px of antialiasing.
-            let edge = 12.0 - distance;
-            let alpha = (edge + 0.5).clamp(0.0, 1.0);
-            data.extend([(alpha * 255.0) as u8, r, g, b]);
+            let d = ((x as f32 - centre).powi(2) + (y as f32 - centre).powi(2)).sqrt();
+            let outer_alpha = (14.5 - d + 0.5).clamp(0.0, 1.0);
+            let ring = (9.8 - d + 0.5).clamp(0.0, 1.0) * (d - 5.2 + 0.5).clamp(0.0, 1.0);
+            let mix = |a: f32, b: f32| (a + (b - a) * ring).round() as u8;
+            data.extend([
+                (outer_alpha * 255.0).round() as u8,
+                mix(BG[0], FG[0]),
+                mix(BG[1], FG[1]),
+                mix(BG[2], FG[2]),
+            ]);
         }
     }
     ksni::Icon { width: SIZE, height: SIZE, data }
